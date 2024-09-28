@@ -25,7 +25,7 @@ package main
 import (
 	"os"
 
-	"gitlab.com/ailox/disco/cmd"
+	"github.com/ailox/disco/cmd"
 )
 
 var (
