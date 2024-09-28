@@ -1,0 +1,20 @@
+# variable files
+.git/
+.vscode/
+
+# docker specific
+Dockerfile
+.dockerignore
+
+# development database
+postgres/
+postgres_data/
+
+# not affecting docker build
+Makefile
+shell.nix
+flake.nix
+flake.lock
+/app/web/frontend/dist/
+image.tar
+binary

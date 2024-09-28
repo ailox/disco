@@ -1,0 +1,10 @@
+postgres_data
+.vscode/
+image.tar
+
+# cache files
+.direnv/
+
+# binary
+binary
+result
