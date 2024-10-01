@@ -45,6 +45,8 @@
             gopls
             gotools
 
+            ffmpeg
+
             kubectl
 
             postgresql

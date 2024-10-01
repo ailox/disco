@@ -1,15 +1,26 @@
 package discord
 
 import (
+	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"layeh.com/gopus"
+)
+
+const (
+	CHANNELS   = 2
+	FRAME_RATE = 48000
+	FRAME_SIZE = 960
+	MAX_BYTES  = FRAME_SIZE * CHANNELS * 2
 )
 
 var buffer = make([][]byte, 0)
@@ -70,12 +81,20 @@ func Airhorn(token string) {
 func ready(s *discordgo.Session, event *discordgo.Ready) {
 
 	// Set the playing status.
-	s.UpdateGameStatus(0, "/airhorn")
+	s.UpdateGameStatus(0, "/airhorn [url]")
 
 	// register the /airhorn command
 	_, err := s.ApplicationCommandCreate(s.State.User.ID, "", &discordgo.ApplicationCommand{
 		Name:        "airhorn",
 		Description: "Plays an airhorn sound in your current voice channel",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "url",
+				Description: "The URL of the audio to play",
+				Required:    true,
+			},
+		},
 	})
 	if err != nil {
 		fmt.Println("Error creating application command: ", err)
@@ -101,6 +120,34 @@ func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
 func commandCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	if i.ApplicationCommandData().Name == "airhorn" {
+
+		options := i.ApplicationCommandData().Options
+		if len(options) != 1 {
+			message := "Please provide a valid URL."
+			interactionResponse := &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: message,
+				},
+			}
+			s.InteractionRespond(i.Interaction, interactionResponse)
+			return
+		}
+
+		urlOption := options[0]
+
+		if urlOption.Name != "url" {
+			message := "Please provide a valid URL."
+			interactionResponse := &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: message,
+				},
+			}
+			s.InteractionRespond(i.Interaction, interactionResponse)
+			return
+		}
+
 		// Find the channel that the message came from.
 		c, err := s.State.Channel(i.ChannelID)
 		if err != nil {
@@ -124,7 +171,8 @@ func commandCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 				})
 
-				err = playSound(s, g.ID, vs.ChannelID)
+				//err = playSound(s, g.ID, vs.ChannelID)
+				err = playYoutube(s, g.ID, vs.ChannelID, urlOption.StringValue())
 				if err != nil {
 					fmt.Println("Error playing sound:", err)
 					// reply to the interaction
@@ -232,4 +280,103 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 	vc.Disconnect()
 
 	return nil
+}
+
+func playYoutube(s *discordgo.Session, guildID, channelID, youtubeURL string) (err error) {
+
+	// Join the provided voice channel.
+	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
+	if err != nil {
+		return err
+	}
+
+	streamURL, err := getStreamURL(youtubeURL)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Playing stream: ", streamURL)
+
+	err = playStream(vc, streamURL)
+	if err != nil {
+		return err
+	}
+
+	// Sleep for a specificed amount of time before ending.
+	time.Sleep(250 * time.Millisecond)
+
+	// Disconnect from the provided voice channel.
+	vc.Disconnect()
+
+	return nil
+}
+
+func playStream(vc *discordgo.VoiceConnection, streamURL string) error {
+	ffmpeg := exec.Command("ffmpeg", "-i", streamURL, "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
+	ffmpegout, err := ffmpeg.StdoutPipe()
+	if err != nil {
+		// wrap error
+		return fmt.Errorf("error creating ffmpeg stdout pipe: %w", err)
+	}
+
+	buffer := bufio.NewReaderSize(ffmpegout, 16384)
+	err = ffmpeg.Start()
+	if err != nil {
+		// wrap error
+		return fmt.Errorf("error starting ffmpeg: %w", err)
+	}
+
+	vc.Speaking(true)
+	defer vc.Speaking(false)
+
+	var send chan []int16
+	if send == nil {
+		send = make(chan []int16, 2)
+	}
+
+	go sendPCM(vc, send)
+	for {
+		audioBuffer := make([]int16, FRAME_SIZE*CHANNELS)
+		err = binary.Read(buffer, binary.LittleEndian, &audioBuffer)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		send <- audioBuffer
+	}
+
+	return nil
+}
+
+func getStreamURL(youtubeURL string) (string, error) {
+	cmd := exec.Command("yt-dlp", "-x", "-f", "bestaudio", "-g", youtubeURL)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func sendPCM(voice *discordgo.VoiceConnection, pcm <-chan []int16) {
+	encoder, err := gopus.NewEncoder(FRAME_RATE, CHANNELS, gopus.Audio)
+	if err != nil {
+		fmt.Println("NewEncoder error,", err)
+		return
+	}
+
+	for {
+		receive, ok := <-pcm
+		if !ok {
+			fmt.Println("PCM channel closed")
+			return
+		}
+		opus, err := encoder.Encode(receive, FRAME_SIZE, MAX_BYTES)
+		if err != nil {
+			fmt.Println("Encoding error,", err)
+			return
+		}
+		voice.OpusSend <- opus
+	}
 }
