@@ -19,6 +19,6 @@ func server(cmd *cli.Cmd) {
 
 	cmd.Action = func() {
 		logger.Info("Starting server")
-		discord.Airhorn(*token)
+		discord.Disco(*token)
 	}
 }

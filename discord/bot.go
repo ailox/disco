@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -14,19 +15,14 @@ import (
 
 var buffer = make([][]byte, 0)
 
+// Declare dcaExecutablePath as a global variable within the discord package
+var dcaExecutablePath = "/home/fabio/go/bin/dca"
+
 var cmdid string
 
-func Airhorn(token string) {
+func Disco(token string) {
 	if token == "" {
 		fmt.Println("No token provided. please use -t <bot token>")
-		return
-	}
-
-	// Load the sound file.
-	err := loadSound()
-	if err != nil {
-		fmt.Println("Error loading sound: ", err)
-		fmt.Println("Please copy airhorn.dca to this directory.")
 		return
 	}
 
@@ -70,12 +66,20 @@ func Airhorn(token string) {
 func ready(s *discordgo.Session, event *discordgo.Ready) {
 
 	// Set the playing status.
-	s.UpdateGameStatus(0, "/airhorn")
+	s.UpdateGameStatus(0, "/play")
 
-	// register the /airhorn command
+	// register the /play command
 	_, err := s.ApplicationCommandCreate(s.State.User.ID, "", &discordgo.ApplicationCommand{
-		Name:        "airhorn",
-		Description: "Plays an airhorn sound in your current voice channel",
+		Name:        "play",
+		Description: "Plays a song from a YouTube URL in your current voice channel",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "url",
+				Description: "The YouTube URL of the song to play",
+				Required:    true,
+			},
+		},
 	})
 	if err != nil {
 		fmt.Println("Error creating application command: ", err)
@@ -89,79 +93,71 @@ func guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
 	if event.Guild.Unavailable {
 		return
 	}
-
-	//for _, channel := range event.Guild.Channels {
-	//	if channel.ID == event.Guild.ID {
-	//		_, _ = s.ChannelMessageSend(channel.ID, "Airhorn is ready! Type !airhorn while in a voice channel to play a sound.")
-	//		return
-	//	}
-	//}
 }
 
 func commandCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
-	if i.ApplicationCommandData().Name == "airhorn" {
-		// Find the channel that the message came from.
-		c, err := s.State.Channel(i.ChannelID)
+	if i.ApplicationCommandData().Name == "play" {
+		// Extract YouTube URL from interaction data
+		youtubeURL := i.ApplicationCommandData().Options[0].StringValue()
+
+		// Download and convert video to .dca
+		dcaFilePath, err := downloadAndConvertToDCA(youtubeURL)
 		if err != nil {
-			// Could not find channel.
+			// Handle error, send error message to user
+			fmt.Println("Error downloading and converting:", err)
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Error playing the requested song.",
+				},
+			})
 			return
 		}
 
-		// Find the guild for that channel.
-		g, err := s.State.Guild(c.GuildID)
+		// Load .dca file into buffer
+		err = loadSound(dcaFilePath)
 		if err != nil {
-			// Could not find guild.
+			// Handle error, send error message to user
+			fmt.Println("Error loading sound:", err)
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Error playing the requested song.",
+				},
+			})
 			return
 		}
 
-		// Look for the message sender in that guild's current voice states.
-		for _, vs := range g.VoiceStates {
-			if vs.UserID == i.Member.User.ID {
-
-				// "Thinking ..."
-				s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-				})
-
-				err = playSound(s, g.ID, vs.ChannelID)
-				if err != nil {
-					fmt.Println("Error playing sound:", err)
-					// reply to the interaction
-					_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "Error playing sound",
-						},
-					})
-					return
-				}
-
-				// reply to the interaction
-				_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-					Type: discordgo.InteractionResponseChannelMessageWithSource,
-					Data: &discordgo.InteractionResponseData{
-						Content: "🎺",
-					},
-				})
-				return
-			}
+		// Find user's voice channel and play the sound
+		err = playSoundInUserChannel(s, i)
+		if err != nil {
+			fmt.Println("Error playing sound:", err)
+			// reply to the interaction
+			_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "Error playing sound",
+				},
+			})
+			return
 		}
 
 		// reply to the interaction
 		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "You need to be in a voice channel to use this command!",
+				Content: "Playing your requested song! 🎵",
 			},
 		})
 	}
 }
 
 // loadSound attempts to load an encoded sound file from disk.
-func loadSound() error {
-
-	file, err := os.Open("airhorn.dca")
+func loadSound(filePath string) error {
+	// Reset the buffer before loading a new sound
+	buffer = make([][]byte, 0)
+	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("Error opening dca file :", err)
 		return err
@@ -186,25 +182,10 @@ func loadSound() error {
 			fmt.Println("Error reading from dca file :", err)
 			return err
 		}
-
-		// Read encoded pcm from dca file.
-		InBuf := make([]byte, opuslen)
-		err = binary.Read(file, binary.LittleEndian, &InBuf)
-
-		// Should not be any end of file errors
-		if err != nil {
-			fmt.Println("Error reading from dca file :", err)
-			return err
-		}
-
-		// Append encoded pcm data to the buffer.
-		buffer = append(buffer, InBuf)
 	}
 }
 
-// playSound plays the current buffer to the provided channel.
 func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
-
 	// Join the provided voice channel.
 	vc, err := s.ChannelVoiceJoin(guildID, channelID, false, true)
 	if err != nil {
@@ -232,4 +213,67 @@ func playSound(s *discordgo.Session, guildID, channelID string) (err error) {
 	vc.Disconnect()
 
 	return nil
+}
+
+func downloadAndConvertToDCA(youtubeURL string) (string, error) {
+	// Define the output file path
+	dcaFilePath := "temp.dca"
+
+	// Construct the yt-dlp command to download the best audio stream
+	ydlCmd := exec.Command("yt-dlp", "-f", "bestaudio", "-o", "-", youtubeURL) // Output to stdout ('-')
+
+	// Construct the dca command without encoding options
+	dcaCmd := exec.Command(dcaExecutablePath, dcaFilePath)
+
+	// Pipe yt-dlp output to dca input
+	dcaCmd.Stdin, _ = ydlCmd.StdoutPipe()
+
+	// Execute the commands
+	err := ydlCmd.Start()
+	if err != nil {
+		return "", fmt.Errorf("error starting yt-dlp: %v", err)
+	}
+
+	output, err := dcaCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("error converting to DCA: %v, output: %s", err, output)
+	}
+
+	fmt.Println("dca output:", string(output)) // Print dca output for debugging
+
+	// Wait for yt-dlp to finish
+	err = ydlCmd.Wait()
+	if err != nil {
+		return "", fmt.Errorf("error waiting for yt-dlp: %v", err)
+	}
+
+	// Add a small delay to ensure the file is fully written
+	time.Sleep(500 * time.Millisecond)
+
+	return dcaFilePath, nil
+}
+
+func playSoundInUserChannel(s *discordgo.Session, i *discordgo.InteractionCreate) (err error) {
+	// Find the channel that the message came from.
+	c, err := s.State.Channel(i.ChannelID)
+	if err != nil {
+		// Could not find channel.
+		return err
+	}
+
+	// Find the guild for that channel.
+	g, err := s.State.Guild(c.GuildID)
+	if err != nil {
+		// Could not find guild.
+		return err
+	}
+
+	// Look for the message sender in that guild's current voice states.
+	for _, vs := range g.VoiceStates {
+		if vs.UserID == i.Member.User.ID {
+			return playSound(s, g.ID, vs.ChannelID)
+		}
+	}
+
+	return fmt.Errorf("user not in a voice channel")
 }
