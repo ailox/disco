@@ -1,21 +1,13 @@
-FROM docker.io/library/node:16.16.0 as frontend
-WORKDIR /app/web/frontend/
-COPY ./web/frontend /app/web/frontend/
-RUN \
-    npm ci \
-    && npm run build
-
-FROM docker.io/library/golang:1.18.4-alpine AS builder
+FROM docker.io/library/golang:1.22.7 AS builder
 WORKDIR /app/
 COPY . /app
-COPY --from=frontend /app/web/frontend/dist/ /app/web/frontend/dist/
 ARG GOARCH=amd64
 ARG GOARM=7
 ARG VERSION=devbuild
 ARG REVISION=0000000
 
 RUN \
-    CGO_ENABLED=0 \
+    CGO_ENABLED=1 \
     GOOS=linux \
     GOPROXY=https://proxy.golang.org,direct \
     go build \
